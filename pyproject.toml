@@ -1,0 +1,31 @@
+[project]
+name = "mrtooley"
+version = "0.1.0"
+description = "Modular, flexible tool collection"
+readme = "README.md"
+authors = [
+    { name = "Adrian Sausenthaler", email = "gpg@sausenthaler.de" }
+]
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+core = ["gnupg"]
+tools = ["mrtooley[core]", "requests"]
+cli = ["mrtooley[tools]"]
+ui = ["mrtooley[tools]", "PySide6"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mrtooley"]
+
+[project.entry-points."mrtooley.tools"]
+official_tools = "mrtooley.tools:OfficialTools"
+ui = "mrtooley.ui.main:run_ui"
+cli = "mrtooley.cli:run_cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
