@@ -2,21 +2,26 @@
 
 import importlib.metadata
 from typing import Iterable, Type, Union
-from enum import Enum, auto, Flag
+from enum import auto, IntEnum
+
+from mrtooley.core.app import App
 
 TOOLS_META_GROUP = "mrtooley.tools"
 
 
-class Categories(Flag):
+class Categories(IntEnum):
     Unspecified = auto()
     Network = auto()
     Analysis = auto()
     Management = auto()
     DeviceDriver = auto()
     ApplicationControl = auto()
+    ServiceControl = auto()
     Communication = auto()
     Database = auto()
     Monitoring = auto()
+    Security = auto()
+    Conversion = auto()
 
 
 def discover_tools():
@@ -29,12 +34,8 @@ def discover_tools():
 
 
 class ToolGroup:
-    NAME = ""
-    GUID = ""
-    CATEGORIES = Categories.Unspecified
-
-    def get_tools(self) -> Iterable[Type[Union["Tool", "ToolGroup"]]]:
-        pass
+    NAME = "Unnamed tool group"
+    TOOLS: Iterable[Type[Union["Tool", "ToolGroup"]]]
 
 
 class Tool:
@@ -44,14 +45,22 @@ class Tool:
     VERSION = 1
     CATEGORIES = Categories.Unspecified
     """
-    log
-    settings
+    logging
+    settings/properties
     instancename
-    state
+    instancing preference: singleton, named instances
+    state: stopped, starting, ready, processing, stopping, notsupported
+    autorun
+    input/output/trigger signals
     """
 
     def __init__(self):
-        pass
+        self._app = None
+        self._settings = None
+
+    @property
+    def settings(self):
+        return self._settings
 
     def log(self, text):
         print(text)
