@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 
 import importlib.metadata
-from typing import Iterable, Type, Union
+from typing import Iterable, Type, Union, Optional
 from enum import auto, IntEnum
-
-from mrtooley.core.app import App
 
 TOOLS_META_GROUP = "mrtooley.tools"
 
@@ -44,6 +42,7 @@ class Tool:
     GUID = ""
     VERSION = 1
     CATEGORIES = Categories.Unspecified
+    TAGS = ""
     """
     logging
     settings/properties
@@ -54,13 +53,23 @@ class Tool:
     input/output/trigger signals
     """
 
-    def __init__(self):
-        self._app = None
-        self._settings = None
+    def __init__(self, instancename: Optional[str]):
+        self.__instancename: Optional[str] = instancename
+        self.__settings = {}
+
+    @classmethod
+    def init(cls, instancename: Optional[str], settings: dict) -> "Tool":
+        instance = cls(instancename)
+        instance.__settings = settings
+        return instance
 
     @property
-    def settings(self):
-        return self._settings
+    def instancename(self) -> Optional[str]:
+        return self.__instancename
+
+    @property
+    def settings(self) -> dict:
+        return self.__settings
 
     def log(self, text):
         print(text)
@@ -71,5 +80,14 @@ class Tool:
     def warn(self, text):
         print(text)
 
-# --- BEGIN SIGNATURES ---
-# 6c48aae5d72a8b1d
+
+class Controls:
+    def __init__(self):
+        inputs = []
+        outputs = []
+
+    def add(self, control):
+        pass
+
+    def remove(self, control):
+        pass

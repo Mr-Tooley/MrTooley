@@ -5,16 +5,11 @@ Core app class
 """
 
 from pathlib import Path
-
-from PySide6.QtCore import QSettings
+from mrtooley.core.storage import StorageMapping
+from mrtooley.core.workspaces import MainWorkspace, Workspace
 
 
 class App:
-    def __init__(self, settings: QSettings):
-        self.settings = settings
-        self._current_workspace_folder = Path(str(self.settings.value("workspace", "")))
-
-    def set_workspace(self, workspace_path: Path):
-
-
-        self._current_workspace_folder = workspace_path
+    def __init__(self, core_settings: StorageMapping):
+        self._core_settings = core_settings
+        self._workspaces = []
