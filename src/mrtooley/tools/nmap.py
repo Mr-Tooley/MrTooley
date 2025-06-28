@@ -27,7 +27,7 @@ PORT SPECIFICATION AND SCAN ORDER:
 
 import subprocess
 from tempfile import TemporaryFile
-from mrtooley.core.tool import Tool
+from mrtooley.core.tool import Tool, ToolStates, ToolCategories, export_function
 from mrtooley.core.network import lookup_mac_oui
 from mrtooley.core.datatypes.network import MACAddress, ip_address, IPv6Address, IPv4Address
 from xml.dom.minidom import parse, Element
@@ -131,10 +131,14 @@ class NmapScanner(Tool):
     NAME = "nmap"
     DESCRIPTION = "nmap IP network scanner"
     GUID = "e949e9f5-14d9-4832-bbbf-7db72bcc42fc"
+    CATEGORIES = ToolCategories.Network, ToolCategories.Analysis
+    TAGS = "nmap, scanner, subnet, ip"
+    AUTHOR = "sausix"
+    ORIGIN = ""
 
-    def __init__(self):
+    def __init__(self, instancename: Optional[str]):
         self.nmap_executable = "nmap"
-        Tool.__init__(self)
+        Tool.__init__(self, instancename)
 
     @classmethod
     def parse_arp(cls) -> dict[str, MACAddress]:
@@ -157,6 +161,7 @@ class NmapScanner(Tool):
         for host in hosts:
             yield ScanEndpoint.from_xmls_host(host, ip_to_mac)
 
+    @export_function
     def pingscan(self, destination: str, lookup_missing_macs=False):
         cmd = [self.nmap_executable, "-sn", destination, "--unprivileged", "-n", "-oX", "-"]
         stderr_file = TemporaryFile("w+")
@@ -186,6 +191,6 @@ class NmapScanner(Tool):
                 self.err("nmap exit code: " + str(proc.returncode))
 
 
-t = NmapScanner()
-for r in t.pingscan("192.168.51.0/24", True):
-    print(r)
+# t = NmapScanner("test")
+# for r in t.pingscan("192.168.51.0/24", True):
+#     print(r)

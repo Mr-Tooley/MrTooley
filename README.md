@@ -35,7 +35,7 @@ Official set of tools
 - Git based versioning of single tools
 - Tool isolation, not only for elevated user execution
 - ui, cli and then a web frontend
-- User auth at most for web frontend.
+- User auth at least for web frontend.
 - Unified simple widgets and helpers for data access to be used in ui, cli and web.
 - Integrity checks
 

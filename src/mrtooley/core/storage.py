@@ -5,17 +5,43 @@ All about key-value storage, path resolution logic for keys
 """
 
 import re
+import datetime
+from contextlib import suppress
 from typing import Any, Union, Type
 from collections.abc import MutableMapping, Mapping
 from abc import ABCMeta, abstractmethod
 from functools import wraps
 from types import MappingProxyType
+from decimal import Decimal
+from mrtooley.core.datatypes import Serializable, Serializer
 
+from mrtooley.core.logger import module_logger
+mlogger = module_logger(__name__)
 
 EMPTY_MAPPING = MappingProxyType({})
 
-# Every storage backend has to handle these types (or transcode them appropriately)
-BASIC_SUPPORTED_DATATYPES: tuple[Type, ...] = (int, bool, float, str, bytes, type(None), Mapping)
+# Every storage backend has to handle these types (or transcode them appropriately internally)
+MINIMAL_SUPPORTED_DATATYPES: tuple[Type, ...] = \
+    (int, bool, float, str, bytes, type(None), Mapping)
+
+# Backends can provide these extra datatypes if they can handle them directly or better
+OPTIONAL_SUPPORTED_DATATYPES: tuple[Type, ...] = \
+    (tuple, Serializable, datetime.date, datetime.time, datetime.datetime, datetime.timedelta)
+
+# Resulting set of supported data types which are guarateed to return in the same format.
+SUPPORTED_DATATYPES = MINIMAL_SUPPORTED_DATATYPES + OPTIONAL_SUPPORTED_DATATYPES
+
+
+# These values are allowed as input but get condensed into a generic type.
+# Reading back stored values won't return the original type!
+LOSSY_VALUE_CONVERSION = {
+    list: tuple,
+    set: tuple,
+    frozenset: tuple,
+    bytearray: bytes,
+    Decimal: float,  # TODO: support Decimal? Maybe.
+}
+
 
 RE_VALID_KEY = re.compile(r"^([a-zA-Z0-9_.]+)$")
 RE_VALID_PATH_FIRST_REMAIN = re.compile(r"^([a-zA-Z0-9_.]+)/([a-zA-Z0-9_./]+)$")
@@ -30,6 +56,12 @@ class StorageError(Exception):
 
 
 class StorageKeyError(KeyError, StorageError):
+    """
+    Specialized KeyError but also raises on invalid paths.
+    """
+
+
+class StorageTypeError(TypeError, StorageError):
     """
     Specialized KeyError but also raises on invalid paths.
     """
@@ -107,25 +139,41 @@ def make_path_aware(func):
         # __getitem__(last_instance, "last_key")
         return unfold_full_path(instance, key)
 
+    def set_value(instance: StorageMapping, f, k, v, vt):
+        # if not isinstance(value, MINIMAL_SUPPORTED_DATATYPES):
+        #     raise StorageTypeError()
+
+        res = f(instance, k, v)
+        instance.flush()
+        return res
+
+    def set_mapping(instance: StorageMapping, f, k, v):
+        # It's a Mapping. Let the backend create one.
+        res = f(instance, k, EMPTY_MAPPING)
+
+        # Get the new specialized StorageMapping instance and copy each item into it
+        new_mapping: StorageMapping = instance[k]
+        new_mapping.update(v)
+        instance.flush()
+        return res
+
     @wraps(func)
     def wrapper_last_mapping_call_key_value(instance, key: str, value):
         # __setitem__(last_instance, key, value)
         last_instance, subkey = unfold_to_last_mapping(instance, key)
 
-        if not isinstance(value, Mapping):
-            res = func(last_instance, subkey, value)
-            last_instance.flush()
-            return res
+        value_type = type(value)
 
-        # It's a Mapping. Let the backend create one.
-        res = func(last_instance, subkey, EMPTY_MAPPING)
+        # Check for lossy datatypes
+        converter = LOSSY_VALUE_CONVERSION.get(value_type)
+        if converter:
+            # Convert value's datatype by the converter
+            value = converter(value)
 
-        # Get new StorageMapping instance and copy each item
-        new_mapping = last_instance[subkey]
-        for k, v in value.items():
-            new_mapping[k] = v
-        last_instance.flush()
-        return res
+        if isinstance(value, Mapping):
+            return set_mapping(last_instance, func, subkey, value)
+
+        return set_value(last_instance, func, subkey, value, value_type)
 
     @wraps(func)
     def wrapper_last_mapping_call_key(instance, key: str):
@@ -166,11 +214,11 @@ class StorageMapping(MutableMapping, metaclass=ABCMeta):
     # __setitem__ is being called directly and __getitem__ is expected to return the same datatype back
     NATIVE_DATATYPES: tuple[Type, ...] = ()
 
-    # Remaining datatypes which the backend can take care of
+    # Remaining datatypes which the backend can take care of by own handling.
     EXTRA_DATATYPES: tuple[Type, ...] = ()
 
-    def __init__(self):
-        pass
+    # def __init__(self):
+    #     pass
 
     @abstractmethod
     def __setitem__(self, key: str, value):
@@ -215,10 +263,8 @@ class StorageMapping(MutableMapping, metaclass=ABCMeta):
         self.flush()
 
     def __del__(self):
-        try:
+        with suppress(Exception):
             self.unload()
-        except Exception as e:
-            pass
 
 
 class StorageBackend(metaclass=ABCMeta):
@@ -236,54 +282,143 @@ class StorageBackend(metaclass=ABCMeta):
     """
 
     MAPPING_CLASS = StorageMapping
+    _BACKENDS: dict[str, Type["StorageBackend"]] = {}
+
+    @classmethod
+    def register_backend_class(cls, key: str, be_class: Type["StorageBackend"]):
+        if key in cls._BACKENDS:
+            raise RuntimeError("Key for backend already registered.")
+
+        mapping_class = be_class.MAPPING_CLASS
+        _missing = set(MINIMAL_SUPPORTED_DATATYPES) - set(mapping_class.NATIVE_DATATYPES) - set(mapping_class.EXTRA_DATATYPES)
+        if _missing:
+            raise NotImplementedError("Backend is missing some minimal supported datatypes: %r" % _missing)
+
+        cls._BACKENDS[key] = be_class
+        mlogger.info("Registered storage backend '%s' as %s", key, be_class)
+
+    @classmethod
+    def get_backend_class(cls, key: str) -> Type["StorageBackend"]:
+        return cls._BACKENDS[key]
+
+    @classmethod
+    @abstractmethod
+    def from_str_arg(cls, arg: str) -> "StorageBackend":
+        """
+        arg is coming directly from ENV
+        """
 
     def __init__(self):
-        pass
+        self.__loaded = True
 
     @abstractmethod
     def get_storage_root(self) -> StorageMapping:
         pass
 
     @abstractmethod
-    def unload(self):
+    def flush(self):
         pass
+
+    def unload(self):
+        if not self.__loaded:
+            return
+        with suppress(Exception) as e:
+            self.flush()
+            self.__loaded = False
 
     def __repr__(self):
         return f"{self.__class__.__name__}"
 
+    def __del__(self):
+        with suppress(Exception) as e:
+            self.unload()
 
-def test_storage_backend(sb: StorageBackend):
+
+@Serializer.register_datatype
+class TestSer(Serializable):
+    def __init__(self, data: bytes):
+        self.data = data
+
+    @classmethod
+    def ser_from_bytes(cls, b: bytes) -> "TestSer":
+        return cls(b)
+
+    def ser_to_bytes(self) -> bytes:
+        return self.data
+
+    def __eq__(self, other):
+        return isinstance(other, TestSer) and other.data == self.data
+
+
+def test_mapping_values(m: StorageMapping):
+    # Test minimal required types in MINIMAL_SUPPORTED_DATATYPES
+    test_data = {
+        "int": 4711,
+        "int_neg": -42,
+        "bool_True": True,
+        "bool_False": False,
+        "float": 1.234,
+        "string_empty": "",
+        "string": "a boring string",
+        "string_emoji": "This robot is looking for your bugs: 🤖",
+        "string_multiline": "a string on\ntwo lines",
+        "string_sz": "a string containing a \x00zero char anywhere",
+        "bytes": b"\x02abc\x03",
+        "bytes_empty": b"",
+        "nothing_to_see_here": None,
+        "serializable": TestSer(b"\x00\x01TEST\xFF")
+    }
+
+    len_before = len(m)
+    num_tests = len(test_data)
+
+    for name, value in test_data.items():
+        m[name] = value
+        returned = m[name]
+        assert returned == value, "Values not equal"
+        assert type(returned) == type(value), (type(returned), type(value))
+
+    assert len(m) == len_before + num_tests
+
+
+def test_mapping(m: StorageMapping):
+    test_mapping_values(m)
+
+    len_before = len(m)
+
+    # Missing "existing"
+    assert "existing" not in m
+
+    assert m.get("existing", "default") == "default"
+    assert "existing" not in m
+
+    assert len(m) == len_before
+
+    # Add "existing"
+    m["existing"] = "to be"
+    assert "existing" in m
+
+    assert len(m) == len_before + 1
+
+    assert m.get("existing", "not to be") == "to be"
+
+    # Remove "existing"
+    del m["existing"]
+
+    assert len(m) == len_before
+    assert "existing" not in m
+
+
+def storage_backend_test(sb: StorageBackend):
     root = sb.get_storage_root()  # type: StorageMapping
 
-    root["key1"] = "value1"
-    root["key2"] = "value2"
-    root["int"] = 42
-    root["float"] = 42.42
-    root["bytes"] = b"bytes!"
+    test_mapping(root)
 
-    for key, val in root.items():
-        print(key, val)
+    root["subpath"] = {}
+    subpath = root["subpath"]
+    test_mapping(subpath)
 
-    assert root["key1"] == "value1"
-    assert root["key2"] == "value2"
-    assert root["int"] == 42
-    assert type(root["int"]) == int
-    assert root["float"] == 42.42
-    assert type(root["float"]) == float
-    assert root["bytes"] == b"bytes!"
-    assert type(root["bytes"]) == bytes
-
-    assert len(root) == 5
-
-    assert "key1" in root
-    del root["key1"]
-
-    assert len(root) == 4
-    assert "key1" not in root
-
-    assert root.get("key1", "default") == "default"
-    assert root.get("key2", "default") == "value2"
-
+    # Testing path logic
     root["paths"] = dict(sub1=1, sub2=2)
     path = root["paths"]
     assert isinstance(path, Mapping)

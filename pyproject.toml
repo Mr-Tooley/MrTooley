@@ -29,3 +29,13 @@ cli = "mrtooley.cli:run_cli"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.black]
+line-length = 120
+skip-string-normalization = true
+
+[tool.flake8]
+max-line-length = 120
+
+[tool.ruff]
+line-length = 120

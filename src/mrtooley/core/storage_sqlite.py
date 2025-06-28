@@ -6,24 +6,33 @@ Sqlite3 storage backend
 
 import sqlite3
 from pathlib import Path
-from mrtooley.core.storage import (StorageMapping, StorageBackend, StorageError, make_path_aware,
-                                   BASIC_SUPPORTED_DATATYPES, StorageKeyError, test_storage_backend)
 from threading import RLock
 from collections.abc import Mapping
 from typing import Optional, Union, Any
+from mrtooley.core.logger import module_logger
+from mrtooley.core import ROOTCONFIG_DIR, startup_environment as se, is_falsey
+from mrtooley.core.datatypes import Serializable, Serializer
+from mrtooley.core.storage import (StorageMapping, StorageBackend, make_path_aware,
+                                   MINIMAL_SUPPORTED_DATATYPES, StorageError, StorageKeyError, storage_backend_test)
+
+logger = module_logger(__name__)
 
 
 FLAG_NATIVE_DATATYPE = 0
 FLAG_MAPPING = 1
 FLAG_BOOL = 2
+FLAG_SERIALIZED = 3
+
+DEBUG = not is_falsey(se.get("SQLITE_DEBUG"))
 
 
 class SqliteMapping(StorageMapping):
     NATIVE_DATATYPES = int, str, float, bytes, type(None)
-    EXTRA_DATATYPES = bool, Mapping
+    EXTRA_DATATYPES = bool, Mapping, Serializable
 
-    if set(NATIVE_DATATYPES) | set(EXTRA_DATATYPES) != set(BASIC_SUPPORTED_DATATYPES):
-        raise NotImplementedError("Backend's supported datatypes differ from BASIC_SUPPORTED_DATATYPES")
+    _missing = set(MINIMAL_SUPPORTED_DATATYPES) - set(NATIVE_DATATYPES) - set(EXTRA_DATATYPES)
+    if _missing:
+        raise NotImplementedError("This backend is missing some minimal supported datatypes: %r" % _missing)
 
     def __init__(self, storage: "SqliteFile", parent_id: Optional[int]):
         StorageMapping.__init__(self)
@@ -49,7 +58,8 @@ class SqliteMapping(StorageMapping):
 
     @make_path_aware
     def __getitem__(self, key: str) -> Union[StorageMapping, Any]:
-        print(f"getting value for {key}...")
+        if DEBUG:
+            logger.debug(f"getting value for {key}...")
 
         if self._my_id is None:
             qry = self._storage.safe_sql_execute(
@@ -72,30 +82,31 @@ class SqliteMapping(StorageMapping):
 
         if flag == FLAG_NATIVE_DATATYPE:
             return value
-
         elif flag == FLAG_BOOL:
             return bool(value)
-
         elif flag == FLAG_MAPPING:
             return SqliteMapping(self._storage, _id)
+        elif flag == FLAG_SERIALIZED:
+            return Serializer.unpack(value)
 
         else:
             raise StorageError("Unsupported flag: " + str(flag))
 
     @make_path_aware
     def __setitem__(self, key: str, value):
-        print(f"setting value for {key} to {value}")
+        if DEBUG:
+            logger.debug(f"setting value for {key} to {value}")
 
-        new_value_type = type(value)
-
-        if issubclass(new_value_type, Mapping):
+        if isinstance(value, Mapping):  # TODO: flag = dict.get(type)
             new_flag = FLAG_MAPPING
-        elif issubclass(new_value_type, self.NATIVE_DATATYPES):
-            new_flag = FLAG_NATIVE_DATATYPE
         elif isinstance(value, bool):
             new_flag = FLAG_BOOL
+        elif isinstance(value, self.NATIVE_DATATYPES):
+            new_flag = FLAG_NATIVE_DATATYPE
+        elif isinstance(value, Serializable):
+            new_flag = FLAG_SERIALIZED
         else:
-            raise TypeError("Unsupported type: " + str(type(value)))
+            raise TypeError("Unsupported type as stored value: %s", type(value))
 
         # Check existing keyvalue
         if self._my_id is None:
@@ -133,8 +144,10 @@ class SqliteMapping(StorageMapping):
             self.sql_set(existing_id, key, new_flag, value)
         elif new_flag == FLAG_BOOL:
             self.sql_set(existing_id, key, new_flag, 1 if value else 0)
+        elif new_flag == FLAG_SERIALIZED:
+            self.sql_set(existing_id, key, new_flag, Serializer.pack(value))
         else:
-            raise TypeError("Unsupported flag: " + str(new_flag))
+            raise TypeError("Unsupported flag: %d", new_flag)
 
     @make_path_aware
     def __delitem__(self, key: str):
@@ -214,6 +227,30 @@ class SqliteMapping(StorageMapping):
 class SqliteFile(StorageBackend):
     MAPPING_CLASS = SqliteMapping
 
+    CREATE_SCRIPT = """
+        CREATE TABLE tree(
+            id INTEGER PRIMARY KEY,
+            parent INTEGER NULL,
+            key TEXT NOT NULL,
+            flag INTEGER NOT NULL,
+            value BLOB NULL,
+            FOREIGN KEY (parent) REFERENCES tree(id) ON DELETE CASCADE
+        );
+        CREATE UNIQUE INDEX parent_key ON tree(parent, key);
+        CREATE INDEX parents ON tree(parent);
+        CREATE INDEX flags ON tree(flag);
+    """
+
+    @classmethod
+    def from_str_arg(cls, arg: str) -> StorageBackend:
+        if arg:
+            file = Path(arg).expanduser()
+            return cls(file, create_parents=True, create_missing=True)
+
+        # Default
+        file = ROOTCONFIG_DIR / "root_storage.sqlite3"
+        return cls(file, create_parents=True, create_missing=True)
+
     def __init__(self, db_file: Optional[Path] = None, create_missing=True, create_parents=False):
         StorageBackend.__init__(self)
         self.lock = RLock()
@@ -246,45 +283,48 @@ class SqliteFile(StorageBackend):
 
     def safe_sql_execute(self, sql: str, params: tuple[Any, ...]) -> sqlite3.Cursor:
         with self.lock:
+            if DEBUG:
+                logger.debug("SQL: '%s'\nParams: %r\n", sql, params)
             cur = self._connection.cursor()
             return cur.execute(sql, params)
 
     def _create_db(self):
         with self.lock:
             cur = self._connection.cursor()
-            cur.executescript("""
-            CREATE TABLE tree(
-                id INTEGER PRIMARY KEY,
-                parent INTEGER NULL,
-                key TEXT NOT NULL,
-                flag INTEGER NOT NULL,
-                value BLOB NULL,
-                FOREIGN KEY (parent) REFERENCES tree(id) ON DELETE CASCADE
-            );
-            CREATE UNIQUE INDEX parent_key ON tree(parent, key);
-            CREATE INDEX parents ON tree(parent);
-            CREATE INDEX flags ON tree(flag);
-            """)
+            if DEBUG:
+                logger.debug(self.CREATE_SCRIPT)
+            cur.executescript(self.CREATE_SCRIPT)
 
     def get_storage_root(self) -> SqliteMapping:
         return SqliteMapping(self, None)
 
     def flush(self):
-        self._connection.commit()
+        if self._connection:
+            self._connection.commit()
 
     def unload(self):
-        SqliteFile.unload(self)
-        self._connection.close()
+        self.flush()
+        if self._connection:
+            self._connection.close()
         self._connection = None
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self._db_file})"
 
 
-def test_sqlite_storage():
+StorageBackend.register_backend_class("SQLITE", SqliteFile)
+
+
+if __name__ == "__main__":
+    # from mrtooley.core.logger import set_log_level, DEBUG
+    #
+    # set_log_level(DEBUG)
+    # logger.debug("Starting debug")
+
     db_path = Path("/tmp/testdb.sqlite")
     if db_path.is_file():
         db_path.unlink()
     db = SqliteFile(db_path)
 
-    test_storage_backend(db)
+    storage_backend_test(db)
+    del db
